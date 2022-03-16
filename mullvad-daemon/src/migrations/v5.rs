@@ -1,5 +1,8 @@
-use super::{Error, Result};
-use crate::{device::DeviceService, DaemonEventSender, InternalDaemonEvent};
+use super::{Error, Result, MigrationComplete};
+use crate::{
+    device::{self, DeviceService},
+    DaemonEventSender, InternalDaemonEvent,
+};
 use mullvad_types::{
     account::AccountToken, device::DeviceData, settings::SettingsVersion, wireguard::WireguardData,
 };
@@ -36,6 +39,7 @@ use talpid_types::ErrorExt;
 /// the account token is also stored in the account history.
 pub(crate) async fn migrate(
     settings: &mut serde_json::Value,
+    mut migration_complete: MigrationComplete,
     rest_handle: mullvad_rpc::rest::MullvadRestHandle,
     daemon_tx: DaemonEventSender,
 ) -> Result<()> {
@@ -44,16 +48,22 @@ pub(crate) async fn migrate(
     if let Some(migration_data) = migration_data {
         let api_handle = rest_handle.availability.clone();
         let service = DeviceService::new(rest_handle, api_handle);
-        match (migration_data.token, migration_data.wg_data) {
-            (token, Some(wg_data)) => {
-                log::info!("Creating a new device cache from previous settings");
-                tokio::spawn(cache_from_wireguard_key(daemon_tx, service, token, wg_data));
-            }
-            (token, None) => {
-                log::info!("Generating a new device for the account");
-                tokio::spawn(cache_from_account(daemon_tx, service, token));
-            }
-        }
+        tokio::spawn(async move {
+            let result = match (migration_data.token, migration_data.wg_data) {
+                (token, Some(wg_data)) => {
+                    log::info!("Creating a new device cache from previous settings");
+                    cache_from_wireguard_key(service, token, wg_data).await
+                }
+                (token, None) => {
+                    log::info!("Generating a new device for the account");
+                    cache_from_account(service, token).await
+                }
+            };
+            migration_complete.set_complete();
+            let _ = daemon_tx.send(InternalDaemonEvent::DeviceMigrationEvent(result));
+        });
+    } else {
+        migration_complete.set_complete();
     }
 
     Ok(())
@@ -130,50 +140,48 @@ fn version_matches(settings: &mut serde_json::Value) -> bool {
 }
 
 async fn cache_from_wireguard_key(
-    daemon_tx: DaemonEventSender,
     service: DeviceService,
     token: AccountToken,
     wg_data: WireguardData,
-) {
-    let devices = match service.list_devices_with_backoff(token.clone()).await {
-        Ok(devices) => devices,
-        Err(error) => {
+) -> std::result::Result<DeviceData, device::Error> {
+    let devices = service
+        .list_devices_with_backoff(token.clone())
+        .await
+        .map_err(|error| {
             log::error!(
                 "{}",
                 error.display_chain_with_msg("Failed to enumerate devices for account")
             );
-            return;
-        }
-    };
+            error
+        })?;
 
     for device in devices.into_iter() {
         if device.pubkey == wg_data.private_key.public_key() {
-            let _ = daemon_tx.send(InternalDaemonEvent::DeviceMigrationEvent(DeviceData {
+            return Ok(DeviceData {
                 token,
                 device,
                 wg_data,
-            }));
-            return;
+            });
         }
     }
     log::info!("The existing WireGuard key is not valid; generating a new device");
-    cache_from_account(daemon_tx, service, token).await;
+    cache_from_account(service, token).await
 }
 
 async fn cache_from_account(
-    daemon_tx: DaemonEventSender,
     service: DeviceService,
     token: AccountToken,
-) {
-    match service.generate_for_account_with_backoff(token).await {
-        Ok(device_data) => {
-            let _ = daemon_tx.send(InternalDaemonEvent::DeviceMigrationEvent(device_data));
-        }
-        Err(error) => log::error!(
-            "{}",
-            error.display_chain_with_msg("Failed to generate new device for account")
-        ),
-    }
+) -> std::result::Result<DeviceData, device::Error> {
+    service
+        .generate_for_account_with_backoff(token)
+        .await
+        .map_err(|error| {
+            log::error!(
+                "{}",
+                error.display_chain_with_msg("Failed to generate new device for account")
+            );
+            error
+        })
 }
 
 #[cfg(test)]

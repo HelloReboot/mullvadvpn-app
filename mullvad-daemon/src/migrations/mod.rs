@@ -32,6 +32,8 @@
 //! 1. Add to the changelog: "Settings format updated to `vY`"
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -87,12 +89,31 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Returns whether there are any background work remaining
+/// after `migrate_all` has returned.
+#[derive(Clone)]
+pub(crate) struct MigrationComplete(Arc<AtomicBool>);
+
+impl MigrationComplete {
+    pub fn new(state: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(state)))
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn set_complete(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 pub(crate) async fn migrate_all(
     cache_dir: &Path,
     settings_dir: &Path,
     rest_handle: mullvad_rpc::rest::MullvadRestHandle,
     daemon_tx: crate::DaemonEventSender,
-) -> Result<()> {
+) -> Result<MigrationComplete> {
     #[cfg(windows)]
     windows::migrate_after_windows_update(settings_dir)
         .await
@@ -101,7 +122,7 @@ pub(crate) async fn migrate_all(
     let path = settings_dir.join(SETTINGS_FILE);
 
     if !path.is_file() {
-        return Ok(());
+        return Ok(MigrationComplete::new(true));
     }
 
     let settings_bytes = fs::read(&path).await.map_err(Error::ReadError)?;
@@ -123,11 +144,13 @@ pub(crate) async fn migrate_all(
     account_history::migrate_location(cache_dir, settings_dir).await;
     account_history::migrate_formats(settings_dir, &mut settings).await?;
 
-    v5::migrate(&mut settings, rest_handle, daemon_tx).await?;
+    let migration_complete = MigrationComplete::new(false);
+
+    v5::migrate(&mut settings, migration_complete.clone(), rest_handle, daemon_tx).await?;
 
     if settings == old_settings {
         // Nothing changed
-        return Ok(());
+        return Ok(migration_complete);
     }
 
     let buffer = serde_json::to_string_pretty(&settings).map_err(Error::SerializeError)?;
@@ -151,7 +174,7 @@ pub(crate) async fn migrate_all(
 
     log::debug!("Migrated settings. Wrote settings to {}", path.display());
 
-    Ok(())
+    Ok(migration_complete)
 }
 
 #[cfg(windows)]
