@@ -15,6 +15,7 @@ import net.mullvad.mullvadvpn.ui.widget.CopyableInformationView
 import net.mullvad.mullvadvpn.ui.widget.InformationView
 import net.mullvad.mullvadvpn.ui.widget.RedeemVoucherButton
 import net.mullvad.mullvadvpn.ui.widget.SitePaymentButton
+import net.mullvad.mullvadvpn.util.capitalizeFirstCharOfEachWord
 import net.mullvad.talpid.tunnel.ErrorStateCause
 import org.joda.time.DateTime
 
@@ -52,6 +53,7 @@ class AccountFragment : ServiceDependentFragment(OnNoService.GoBack) {
 
     private lateinit var accountExpiryView: InformationView
     private lateinit var accountNumberView: CopyableInformationView
+    private lateinit var deviceNameView: InformationView
     private lateinit var sitePaymentButton: SitePaymentButton
     private lateinit var redeemVoucherButton: RedeemVoucherButton
     private lateinit var titleController: CollapsibleTitleController
@@ -83,12 +85,13 @@ class AccountFragment : ServiceDependentFragment(OnNoService.GoBack) {
             logout()
         }
 
+
         accountNumberView = view.findViewById<CopyableInformationView>(R.id.account_number).apply {
             displayFormatter = { rawAccountNumber -> addSpacesToAccountNumber(rawAccountNumber) }
         }
 
         accountExpiryView = view.findViewById(R.id.account_expiry)
-
+        deviceNameView = view.findViewById(R.id.device_name)
         titleController = CollapsibleTitleController(view)
 
         return view
@@ -100,6 +103,14 @@ class AccountFragment : ServiceDependentFragment(OnNoService.GoBack) {
                 .onEach { state -> if (state.isUnknown()) deviceRepository.refreshDeviceState() }
                 .collect {
                     accountNumberView.information = it.token()
+                }
+        }
+
+        jobTracker.newUiJob("updateDeviceName") {
+            deviceRepository.deviceState
+                .onEach { state -> if (state.isUnknown()) deviceRepository.refreshDeviceState() }
+                .collect { state ->
+                    deviceNameView.information = state.deviceName()?.capitalizeFirstCharOfEachWord()
                 }
         }
 
