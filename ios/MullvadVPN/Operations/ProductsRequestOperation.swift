@@ -10,8 +10,10 @@ import Foundation
 import StoreKit
 
 class ProductsRequestOperation: AsyncOperation, SKProductsRequestDelegate {
+    typealias CompletionHandler = (OperationCompletion<SKProductsResponse, Error>) -> Void
+
     private let productIdentifiers: Set<String>
-    private var completionHandler: ((OperationCompletion<SKProductsResponse, Error>) -> Void)?
+    private var completionHandler: CompletionHandler?
 
     private let maxRetryCount = 10
     private let retryDelay: DispatchTimeInterval = .seconds(2)
@@ -20,7 +22,7 @@ class ProductsRequestOperation: AsyncOperation, SKProductsRequestDelegate {
     private var retryTimer: DispatchSourceTimer?
     private var request: SKProductsRequest?
 
-    init(productIdentifiers: Set<String>, completionHandler: @escaping (OperationCompletion<SKProductsResponse, Error>) -> Void) {
+    init(productIdentifiers: Set<String>, completionHandler: @escaping CompletionHandler) {
         self.productIdentifiers = productIdentifiers
         self.completionHandler = completionHandler
 
